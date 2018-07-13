@@ -10,10 +10,6 @@ namespace EntityTest
         public MyModel()
             : base("name=MyModel")
         {
-            // Указывает EF, что если модель изменилась,
-            // нужно воссоздать базу данных с новой структурой
-            /*Database.SetInitializer(
-                new DropCreateDatabaseIfModelChanges<MyModel>());*/
         }
 
         public virtual DbSet<Referat> Referats { get; set; }

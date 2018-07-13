@@ -1,10 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Data;
-using System.Drawing;
 using System.Linq;
-using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using AngleSharp;
@@ -16,26 +14,44 @@ namespace EntityTest
 {
     public partial class Form1 : Form
     {
-        public List<string> categories = new List<string>(); //список категорий рефератов
+        static public List<string> categories = new List<string>();//список категорий рефератов
         public List<Tuple<string, string>> catsHrefs = new List<Tuple<string, string>>(); // ссылка на реферат и категория
         List<Referat> refs = new List<Referat>(); //рефераты типа category, data
+        int time;
 
         public Form1()
         {
             InitializeComponent();
         }
 
+        //очистка переменных
+        public void ClearLists()
+        {
+            categories.Clear();
+            catsHrefs.Clear();
+            refs.Clear();
+        }
+
+        //вызвать получение данных с Яндекса
+        private async void button1_Click(object sender, EventArgs e)
+        {
+            ClearLists();
+            ClearDB();
+            await Task.Run(() => DownloadData());
+            textBox2.Text += "Потоков: " + (int)ThreadsCountNumericUpDown.Value +
+            ". Рефератов: " + (int)ReferatsCountNumericUpDown.Value + ". Время выполнения: " + time + " сек." + "\r\n";
+            button2.PerformClick();
+        }
         //Получить данные с Яндекса
-        private void button1_Click(object sender, EventArgs e)
+        public void DownloadData()
         {
             Int32 start = (Int32)(DateTime.UtcNow.Subtract(new DateTime(1970, 1, 1))).TotalSeconds; //начало парсинга
-            AngleSharp(); //получение списка категорий
-
+            //AngleSharp(); //получение списка категорий
+            int refscount = (int)ReferatsCountNumericUpDown.Value + 1; //сколько рефератов качать
             try
             {
-                int refscount = (int)ReferatsCountNumericUpDown.Value + 1; //сколько рефератов качать
                 //для каждой категории
-                foreach (var item in categories)
+                foreach (var item in AngleSharp())
                 {
                     //все рефераты
                     for (int i = 1; i < refscount; i++)
@@ -51,14 +67,34 @@ namespace EntityTest
             }
 
             //получение рефератов
-            foreach (var t in catsHrefs)
+            int ThreadsCount = (int)ThreadsCountNumericUpDown.Value;
+            using (SemaphoreSlim concurrencySemaphore = new SemaphoreSlim(ThreadsCount))
             {
-                //парсим страницу реферата
-                AngleSharp2(t.Item1, t.Item2);
+                List<Task> tasks = new List<Task>();
+                foreach (var href in catsHrefs)
+                {
+                    concurrencySemaphore.Wait();
+
+                    var t = Task.Factory.StartNew(() =>
+                    {
+                        try
+                        {
+                            InsertRefsToDB(AngleSharp2(href.Item1, href.Item2).ToList()); //вставляем данные в бд
+                        }
+                        finally
+                        {
+                            concurrencySemaphore.Release();
+                        }
+                    });
+
+                    tasks.Add(t);
+                }
+
+                Task.WaitAll(tasks.ToArray());
             }
+
             Int32 end = (Int32)(DateTime.UtcNow.Subtract(new DateTime(1970, 1, 1))).TotalSeconds; //конец парсинга
-            MessageBox.Show("Рефераты с Яндекса загружены. Загрузка заняла: " + (end-start).ToString() + " секунд"); //сообщение об окончании парсинга
-            InsertRefsToDB(); //вставляем данные в бд
+            time = end - start;
         }
 
         //получение списка категорий
@@ -68,7 +104,7 @@ namespace EntityTest
             var html = dl.DownloadString("https://yandex.ru/referats/");
             var parser = new HtmlParser();
             var document = parser.Parse(html);
-            
+
             foreach (IElement element in document.QuerySelectorAll("div.topics__item > span > span > input"))
             {
                 categories.Add(element.GetAttribute("value"));
@@ -78,7 +114,7 @@ namespace EntityTest
         }
 
         //получение реферата
-        public IEnumerable<string> AngleSharp2(string href, string cat)
+        public IEnumerable<Referat> AngleSharp2(string href, string cat)
         {
             var config = Configuration.Default.WithDefaultLoader();
             var task = BrowsingContext.New(config).OpenAsync(href); //используем чтобы не было проблем с кодировкой
@@ -94,19 +130,15 @@ namespace EntityTest
             referat.Data = data;
             refs.Add(referat); //добавляем реферат в список рефератов
             
-            return categories;
+            return refs;
         }
 
         //вставка данных в бд
-        public void InsertRefsToDB()
+        public void InsertRefsToDB(List<Referat> rfs)
         {
             using (MyModel db = new MyModel())
             {
-                db.Database.ExecuteSqlCommand("TRUNCATE TABLE [Referats]"); //очищаем таблицу в бд
-                foreach (Referat item in refs)
-                {
-                    db.Referats.Add(item); //записываем данные в бд
-                }
+                db.Referats.Add(rfs.Last()); //записываем данные в бд
                 db.SaveChanges(); //сохраняем изменения бд
             }
         }
@@ -129,7 +161,7 @@ namespace EntityTest
                     .Select(
                         g => new
                         {
-                            Category = g.First().Category,
+                            Cat = g.First().Category,
                             Value = g.Sum(s => s.Data.Count(x => x == ' ')) //суммируем кол-во для каждого реферата
                         })
                         .OrderByDescending(x => x.Value) //сортируем по кол-ву
@@ -138,7 +170,7 @@ namespace EntityTest
 
                 foreach (var obj in c2)
                 {
-                    textBox1.Text += "Категория: " + obj.Category + ". Кол-во слов: " + obj.Value + "\r\n"; //отображаем на экране
+                    textBox1.Text += "Категория: " + obj.Cat + ". Кол-во слов: " + obj.Value + "\r\n"; //отображаем на экране
                 }
             }
         }
@@ -146,7 +178,26 @@ namespace EntityTest
         //показать топ 5
         private void button2_Click(object sender, EventArgs e)
         {
+            ClearLists();
             ShowTOP5();
+        }
+
+        //вызвать очистку базы данных
+        private void button3_Click(object sender, EventArgs e)
+        {
+            ClearDB();
+        }
+
+        //очистка базы данных
+        public async void ClearDB()
+        {
+            await Task.Run(() =>
+            {
+                using (MyModel db = new MyModel())
+                {
+                    db.Database.ExecuteSqlCommand("TRUNCATE TABLE [Referats]"); //очищаем таблицу в бд
+                }
+            });
         }
     }
 }
